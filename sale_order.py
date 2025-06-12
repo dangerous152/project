@@ -1162,36 +1162,23 @@ class SaleOrderDao(BaseDAO):
         return operator_mapping[amount_filter.operator](field, value)
 
     async def do_get_local_order_pc_list_info(self, query_param_in: QueryParamPCIn):
-        """
-        分页获取本地订单列表(PC端)
-        """
-        # 获取销售订单状态转换
+        """优化后的分页获取本地订单列表(PC端)"""
         state_case = self.sale_order_state_trans()
 
-        # 转换分页
         offset_count = query_param_in.page_size * (query_param_in.page_number - 1)
 
-        # 构建基础查询条件
         conditions = [
             SaleOrder.disabled.is_(False),
             SaleOrder.company_id == query_param_in.company_id,
-            # 门店收银
-            SaleOrder.order_source == OrderSourceEnum.STORE_ORDER.code
+            SaleOrder.order_source == OrderSourceEnum.STORE_ORDER.code,
         ]
 
-        # 添加门店ID条件
         if query_param_in.store_ids:
-            conditions.append(
-                SaleOrder.store_team_info_id.in_(query_param_in.store_ids)
-            )
+            conditions.append(SaleOrder.store_team_info_id.in_(query_param_in.store_ids))
 
-        # 添加订单号条件
         if query_param_in.order_number:
-            conditions.append(
-                SaleOrder.order_number.ilike(f"%{query_param_in.order_number}%")
-            )
+            conditions.append(SaleOrder.order_number.ilike(f"%{query_param_in.order_number}%"))
 
-        # 添加商品过滤条件(SaleOrder.record_id == xxx.order_id )
         if query_param_in.product_name:
             product_name_like_str = fuzzy_search_string(
                 string=query_param_in.product_name,
@@ -1205,37 +1192,33 @@ class SaleOrderDao(BaseDAO):
                         and_(
                             SaleOrderItem.order_id == SaleOrder.record_id,
                             SaleOrderItem.disabled.is_(False),
-                            # 这里转义
                             or_(
                                 SaleOrderItem.goods_sale_name.ilike(
                                     product_name_like_str,
                                     escape=DEFAULT_ESCAPE_CHAR,
                                 ),
-                                # 已确认不管输入什么字符串都模糊匹配
                                 SaleOrderItem.barcode.ilike(
                                     product_name_like_str,
                                     escape=DEFAULT_ESCAPE_CHAR,
-                                )
-                            )
+                                ),
+                            ),
                         )
                     )
+                    .correlate(SaleOrder)
                 )
             )
 
-        # 添加状态条件
         if query_param_in.states:
             conditions.append(SaleOrder.state.in_(query_param_in.states))
         else:
             conditions.append(SaleOrder.state.in_([4, 5, 6, 8, 9, 10, 11]))
 
-        # 添加金额过滤条件
         if query_param_in.amount_filter:
             for amount_filter in query_param_in.amount_filter:
                 condition = self.get_amount_condition(amount_filter)
                 if condition is not None:
                     conditions.append(condition)
 
-        # 添加支付方式条件
         if query_param_in.payment_method:
             conditions.append(
                 exists(
@@ -1244,250 +1227,139 @@ class SaleOrderDao(BaseDAO):
                     .where(
                         and_(
                             SaleOrderPayment.order_id == SaleOrder.record_id,
-                            SaleOrderPayment.payment_method_id.in_(
-                                query_param_in.payment_method
-                            ),
+                            SaleOrderPayment.payment_method_id.in_(query_param_in.payment_method),
                             SaleOrderPayment.is_pay_success.is_(True),
                         )
                     )
-                    .correlate(SaleOrder)  # 明确指定与 SaleOrder 的关联
+                    .correlate(SaleOrder)
                 )
             )
 
-        # 添加下单时间范围条件
         if query_param_in.create_at_start:
             conditions.append(SaleOrder.created_at >= query_param_in.create_at_start)
-
         if query_param_in.create_at_end:
             conditions.append(SaleOrder.created_at <= query_param_in.create_at_end)
 
-        # 添加渠道ID条件
         if query_param_in.channel_ids:
             conditions.append(SaleOrder.channel_id.in_(query_param_in.channel_ids))
 
-        # 下单用户姓名/手机号
         if query_param_in.user_name_or_phone:
             conditions.append(
                 or_(
-                    SaleOrder.member_name.ilike(
-                        f"%{query_param_in.user_name_or_phone}%"
-                    ),
-                    SaleOrder.member_phone.ilike(
-                        f"%{query_param_in.user_name_or_phone}%"
-                    ),
-                ),
+                    SaleOrder.member_name.ilike(f"%{query_param_in.user_name_or_phone}%"),
+                    SaleOrder.member_phone.ilike(f"%{query_param_in.user_name_or_phone}%"),
+                )
             )
 
-        # 添加操作人搜索条件
         if query_param_in.operater_name_or_phone:
             conditions.append(
                 or_(
-                    SaleOrder.operater_name.ilike(
-                        f"%{query_param_in.operater_name_or_phone}%"
-                    ),
-                    SaleOrder.operater_phone.ilike(
-                        f"%{query_param_in.operater_name_or_phone}%"
-                    ),
+                    SaleOrder.operater_name.ilike(f"%{query_param_in.operater_name_or_phone}%"),
+                    SaleOrder.operater_phone.ilike(f"%{query_param_in.operater_name_or_phone}%"),
                 )
             )
 
-        # 添加营业日范围条件
         if query_param_in.business_day_start:
-            conditions.append(
-                SaleOrder.business_day >= query_param_in.business_day_start
-            )
+            conditions.append(SaleOrder.business_day >= query_param_in.business_day_start)
         if query_param_in.business_day_end:
             conditions.append(SaleOrder.business_day <= query_param_in.business_day_end)
 
-        # 基础订单金额统计
-        order_base_amount_count = (
-            select(
-                SaleOrder.id,
-            )
-            .distinct()
-            .select_from(SaleOrder)
-            .outerjoin(
-                SaleOrderPayment, SaleOrder.record_id == SaleOrderPayment.order_id
-            )
+        base_query = (
+            select(SaleOrder.id, SaleOrder.order_number)
             .where(and_(*conditions))
-            .cte("order_base_amount_count")
+            .cte("base_order")
         )
 
-        # 支付成功数据
-        pay_success_data = (
+        pay_amount_sub = (
             select(
-                SaleOrder.id,
-                func.round(
-                    func.sum(cast(SaleOrderPayment.payment_amount, Numeric)), 2
-                ).label("success_pay_amount"),
+                SaleOrder.id.label("id"),
+                func.round(func.sum(cast(SaleOrderPayment.payment_amount, Numeric)), 2).label(
+                    "success_pay_amount"
+                ),
             )
             .select_from(SaleOrder)
-            .outerjoin(
-                SaleOrderPayment, SaleOrder.record_id == SaleOrderPayment.order_id
-            )
+            .join(SaleOrderPayment, SaleOrder.record_id == SaleOrderPayment.order_id)
             .where(
                 and_(
-                    SaleOrder.disabled.is_(False),
                     SaleOrderPayment.is_pay_success.is_(True),
-                    SaleOrder.id.in_(select(order_base_amount_count.c.id)),
+                    SaleOrder.id.in_(select(base_query.c.id)),
                 )
             )
             .group_by(SaleOrder.id)
-            .cte("orde_list_pay_success_data")
+            .cte("pay_amount_sub")
         )
 
-        # 金额统计主查询
-        amount_count_query = (
-            select(
-                case(
-                    (
-                        func.round(
-                            func.sum(cast(SaleOrder.total_origin_price, Numeric)), 2
-                        ).is_not(None),
-                        func.round(
-                            func.sum(cast(SaleOrder.total_origin_price, Numeric)), 2
-                        ),
-                    ),
-                    else_=0,
-                ).label("total_price"),
-                case(
-                    (
-                        func.round(
-                            func.sum(cast(SaleOrder.discount_price, Numeric)), 2
-                        ).is_not(None),
-                        func.round(
-                            func.sum(cast(SaleOrder.discount_price, Numeric)), 2
-                        ),
-                    ),
-                    else_=0,
-                ).label("total_discount_price"),
-                case(
-                    (
-                        func.round(
-                            func.sum(
-                                cast(pay_success_data.c.success_pay_amount, Numeric)
-                            ),
-                            2,
-                        ).is_not(None),
-                        func.round(
-                            func.sum(
-                                cast(pay_success_data.c.success_pay_amount, Numeric)
-                            ),
-                            2,
-                        ),
-                    ),
-                    else_=0,
-                ).label("total_receive_price"),
-                func.count(SaleOrder.id).label("total_count"),
-            )
-            .select_from(SaleOrder)
-            .outerjoin(pay_success_data, SaleOrder.id == pay_success_data.c.id)
-            .where(
-                and_(
-                    SaleOrder.disabled.is_(False),
-                    SaleOrder.company_id == query_param_in.company_id,
-                    SaleOrder.id.in_(select(order_base_amount_count.c.id)),
-                )
-            )
-        )
+        order_query = select(base_query.c.id, base_query.c.order_number).select_from(base_query)
 
-        # 构建销售订单列表基础查询
-        sale_order_list_base_query = (
-            select(SaleOrder.id)
-            .select_from(SaleOrder)
-            .outerjoin(
-                SaleOrderPayment, SaleOrder.record_id == SaleOrderPayment.order_id
-            )
-            .where(and_(*conditions))
-        ).cte("order_base_table")
-        # 支付成功数据子查询
+        if query_param_in.receive_price:
+            order_query = order_query.outerjoin(pay_amount_sub, base_query.c.id == pay_amount_sub.c.id)
+            if query_param_in.receive_price == "descend":
+                order_query = order_query.order_by(pay_amount_sub.c.success_pay_amount.desc())
+            else:
+                order_query = order_query.order_by(pay_amount_sub.c.success_pay_amount.asc())
+        elif query_param_in.total_origin_price:
+            if query_param_in.total_origin_price == "descend":
+                order_query = order_query.order_by(SaleOrder.total_origin_price.desc())
+            else:
+                order_query = order_query.order_by(SaleOrder.total_origin_price.asc())
+        elif query_param_in.discount_price:
+            if query_param_in.discount_price == "descend":
+                order_query = order_query.order_by(SaleOrder.discount_price.desc())
+            else:
+                order_query = order_query.order_by(SaleOrder.discount_price.asc())
+        else:
+            order_query = order_query.order_by(SaleOrder.created_at.desc())
+
+        order_query = order_query.limit(query_param_in.page_size).offset(offset_count)
+
+        id_result = await self.db_session.execute(order_query)
+        id_rows = id_result.fetchall()
+        order_ids = [r.id for r in id_rows]
+        order_numbers = [r.order_number for r in id_rows]
+
+        if not order_ids:
+            return {
+                "records_list": [],
+                "amount_data": {
+                    "total_price": 0,
+                    "total_discount_price": 0,
+                    "total_receive_price": 0,
+                    "total_count": 0,
+                },
+            }
+
         pay_success_query = (
             select(
                 SaleOrder.id,
-                func.round(
-                    func.sum(cast(SaleOrderPayment.payment_amount, Numeric)), 2
-                ).label("success_pay_amount"),
+                func.round(func.sum(cast(SaleOrderPayment.payment_amount, Numeric)), 2).label(
+                    "success_pay_amount"
+                ),
             )
             .select_from(SaleOrder)
-            .outerjoin(
-                SaleOrderPayment, SaleOrder.record_id == SaleOrderPayment.order_id
-            )
+            .join(SaleOrderPayment, SaleOrder.record_id == SaleOrderPayment.order_id)
             .where(
-                and_(
-                    SaleOrder.disabled.is_(False),
-                    SaleOrderPayment.is_pay_success.is_(True),
-                    SaleOrder.id.in_(select(sale_order_list_base_query.c.id)),
-                )
+                and_(SaleOrderPayment.is_pay_success.is_(True), SaleOrder.id.in_(order_ids))
             )
             .group_by(SaleOrder.id)
-        ).cte("orde_list_pay_success_data")
-        # 查询销售订单下面的商品
-        sale_order_item_subquery = (
-            select(
-                SaleOrderItem.order_id,
-                SaleOrderItem.goods_sale_name,
-                SaleOrderItem.picture_url,
-                func.concat(
-                    "¥",
-                    func.cast(
-                        func.round(func.cast(SaleOrderItem.selling_price, Numeric), 2),
-                        String,
-                    ),
-                ).label("selling_price"),
-                func.concat(
-                    SaleOrderItem.purchase_quantity, SaleOrderItem.goods_unit_name
-                ).label("quantity"),
-                func.row_number()
-                .over(partition_by=SaleOrderItem.order_id, order_by=SaleOrderItem.id)
-                .label("row_num"),
-                # 计算商品总条数
-                func.count(SaleOrderItem.id)
-                .over(partition_by=SaleOrderItem.order_id)
-                .label("total_count"),
+        ).cte("pay_success_query")
 
-                # purchase_quantity
-                func.sum(
-                    func.cast(
-                        SaleOrderItem.purchase_quantity,
-                        Numeric
-                    )
-                ).over(partition_by=SaleOrderItem.order_id)
-                .label("total_purchase_quantity"),
-
-                # goods_spec
-                SaleOrderItem.goods_spec,
-                # goods_package_sku_id
-                SaleOrderItem.goods_package_sku_id,
-                # sku_code
-                SaleOrderItem.sku_code,
-                # goods_specification
-                SaleOrderItem.goods_specification,
-            )
-            .select_from(SaleOrderItem)
-            .join(SaleOrder, SaleOrder.record_id == SaleOrderItem.order_id)
-            .where(
-                SaleOrder.disabled.is_(False),
-                SaleOrder.id.in_(select(sale_order_list_base_query.c.id)),
-            )
-        ).cte("sale_order_item_subquery")
         payment_methods_subquery = (
             select(
                 SaleOrderPayment.order_id,
-                func.string_agg(
-                    func.distinct(SaleOrderPayment.payment_method_name), "、"
-                ).label("pay_channel"),
+                func.string_agg(func.distinct(SaleOrderPayment.payment_method_name), "、").label("pay_channel"),
             )
             .select_from(SaleOrderPayment)
+            .where(SaleOrderPayment.order_id.in_(order_ids))
             .group_by(SaleOrderPayment.order_id)
         ).cte("payment_methods")
-        # 销售订单类别主查询
-        sale_order_list_main_query = (
+
+        main_query = (
             select(
                 SaleOrder.id,
                 SaleOrder.order_number,
                 SaleOrder.store_name,
                 SaleOrder.channel_name,
-                SaleOrder.created_at,
+                func.concat(SaleOrder.store_name, " - ", SaleOrder.channel_name).label("store_channel_name"),
                 case(
                     (
                         and_(
@@ -1496,197 +1368,77 @@ class SaleOrderDao(BaseDAO):
                             SaleOrder.member_name != "",
                             SaleOrder.member_phone != "",
                         ),
-                        func.concat(
-                            SaleOrder.member_name, "(", SaleOrder.member_phone, ")"
-                        ),
+                        func.concat(SaleOrder.member_name, "(", SaleOrder.member_phone, ")"),
                     ),
                     (
-                        or_(
-                            SaleOrder.member_name.is_(None),
-                            SaleOrder.member_name == "",
-                        ),
+                        or_(SaleOrder.member_name.is_(None), SaleOrder.member_name == ""),
                         "散客",
                     ),
                     else_=SaleOrder.member_name,
                 ).label("member_name_phone"),
-                func.to_char(SaleOrder.create_at, "YYYY-MM-DD HH24:MI:SS").label(
-                    "create_at"
-                ),
+                func.to_char(SaleOrder.create_at, "YYYY-MM-DD HH24:MI:SS").label("create_at"),
                 case(
                     (
-                        SaleOrder.business_day.isnot(None),
-                        func.to_char(SaleOrder.business_day, "YYYY-MM-DD"),
+                        SaleOrder.total_origin_price.is_not(None),
+                        cast(func.round(cast(SaleOrder.total_origin_price, Numeric), 2), String),
                     ),
                     else_="-",
-                ).label("business_day"),
-                cast(
-                    func.round(cast(SaleOrder.total_origin_price, Numeric), 2), String
                 ).label("total_origin_price"),
-                cast(SaleOrder.total_origin_price, Numeric).label("total_origin_price_numeric"),
-                cast(
-                    func.round(cast(SaleOrder.discount_price, Numeric), 2), String
-                ).label("discount_price"),
-                cast(SaleOrder.discount_price, Numeric).label("discount_price_numeric"),
                 case(
-                    (state_case.in_(["已创建", "待支付"]), "_"),
+                    (
+                        SaleOrder.discount_price.is_not(None),
+                        cast(func.round(cast(SaleOrder.discount_price, Numeric), 2), String),
+                    ),
+                    else_="-",
+                ).label("discount_price"),
+                case(
+                    (state_case.in_(["已创建", "待支付"]), "-"),
                     (
                         pay_success_query.c.success_pay_amount.isnot(None),
-                        cast(
-                            func.round(
-                                cast(pay_success_query.c.success_pay_amount, Numeric), 2
-                            ),
-                            String,
-                        ),
+                        cast(pay_success_query.c.success_pay_amount, String),
                     ),
-                    else_="_",
+                    else_="-",
                 ).label("receive_price"),
-                cast(pay_success_query.c.success_pay_amount, Numeric).label("receive_price_numeric"),
-                payment_methods_subquery.c.pay_channel,
-                SaleOrder.state.label("state_id"),
                 state_case.label("state_name"),
                 case(
-                    (
-                        SaleOrder.operater_name.isnot(None),
-                        case(
-                            (
-                                SaleOrder.operater_phone.isnot(None),
-                                func.concat(
-                                    SaleOrder.operater_name,
-                                    "(",
-                                    SaleOrder.operater_phone,
-                                    ")",
-                                ),
-                            ),
-                            else_=SaleOrder.operater_name,
-                        ),
-                    ),
-                    else_="_",
+                    (SaleOrder.operater_name.isnot(None), SaleOrder.operater_name),
+                    else_="-",
                 ).label("operater_name_phone"),
-                func.json_agg(
-                    func.json_build_object(
-                        "goods_sale_name",
-                        sale_order_item_subquery.c.goods_sale_name,
-                        "selling_price",
-                        sale_order_item_subquery.c.selling_price,
-                        "quantity",
-                        sale_order_item_subquery.c.quantity,
-
-                        # goods_spec
-                        "goods_spec",
-                        sale_order_item_subquery.c.goods_spec,
-
-                        # goods_package_sku_id
-                        "goods_package_sku_id",
-                        sale_order_item_subquery.c.goods_package_sku_id,
-
-                        # sku_code
-                        "sku_code",
-                        sale_order_item_subquery.c.sku_code,
-
-                        # goods_specification
-                        "goods_specification",
-                        sale_order_item_subquery.c.goods_specification,
-                    )
-                )
-                .filter(sale_order_item_subquery.c.row_num <= 8)
-                .label("items_info"),  # 添加商品信息字段
-                # 计算商品总条数
-                sale_order_item_subquery.c.total_count,
-                # total_quantity
-                func.cast(
-                    sale_order_item_subquery.c.total_purchase_quantity,
-                    String,
-                ).label("total_purchase_quantity"),
-                # 添加商品图片
-                func.array_agg(sale_order_item_subquery.c.picture_url)
-                .filter(sale_order_item_subquery.c.picture_url.isnot(None))
-                .label("picture_urls"),
-            )
-            .select_from(SaleOrder)
-            .outerjoin(
-                payment_methods_subquery,
-                SaleOrder.record_id == payment_methods_subquery.c.order_id,
-            )
-            .outerjoin(pay_success_query, SaleOrder.id == pay_success_query.c.id)
-            .outerjoin(
-                sale_order_item_subquery,
-                SaleOrder.record_id == sale_order_item_subquery.c.order_id,
-            )
-            .where(
-                and_(
-                    SaleOrder.disabled.is_(False),
-                    SaleOrder.id.in_(select(sale_order_list_base_query.c.id)),
-                )
-            )
-            .group_by(
-                SaleOrder.id,
-                SaleOrder.order_number,
-                SaleOrder.store_name,
-                SaleOrder.channel_name,
-                SaleOrder.member_name,
-                SaleOrder.member_phone,
-                SaleOrder.create_at,
-                SaleOrder.business_day,
-                SaleOrder.total_origin_price,
-                SaleOrder.discount_price,
-                SaleOrder.operater_name,
-                SaleOrder.operater_phone,
-                pay_success_query.c.success_pay_amount,
-                SaleOrder.created_at,
-                sale_order_item_subquery.c.total_count,
-                sale_order_item_subquery.c.total_purchase_quantity,
-                sale_order_item_subquery.c.order_id,
-                payment_methods_subquery.c.order_id,
                 payment_methods_subquery.c.pay_channel,
             )
-            .limit(query_param_in.page_size)
-            .offset(offset_count)
+            .select_from(SaleOrder)
+            .outerjoin(pay_success_query, SaleOrder.id == pay_success_query.c.id)
+            .outerjoin(payment_methods_subquery, SaleOrder.record_id == payment_methods_subquery.c.order_id)
+            .where(SaleOrder.id.in_(order_ids))
         )
 
-        if query_param_in.total_origin_price:
-            if query_param_in.total_origin_price == "descend":
-                sale_order_list_main_query = sale_order_list_main_query.order_by(
-                    literal_column("total_origin_price_numeric").desc())
-            elif query_param_in.total_origin_price == "ascend":
-                sale_order_list_main_query = sale_order_list_main_query.order_by(
-                    literal_column("total_origin_price_numeric").asc())
+        result = await self.db_session.execute(main_query)
+        records = [dict(row._mapping) for row in result.fetchall()]
 
-        elif query_param_in.discount_price:
-            if query_param_in.discount_price == "descend":
-                sale_order_list_main_query = sale_order_list_main_query.order_by(
-                    literal_column("discount_price_numeric").desc())
-            elif query_param_in.discount_price == "ascend":
-                sale_order_list_main_query = sale_order_list_main_query.order_by(
-                    literal_column("discount_price_numeric").asc())
+        order_items_info = await self.get_order_items_by_order_number(order_numbers)
 
-        elif query_param_in.receive_price:
-            if query_param_in.receive_price == "descend":
-                sale_order_list_main_query = sale_order_list_main_query.order_by(
-                    literal_column("receive_price_numeric").desc())
-            elif query_param_in.receive_price == "ascend":
-                sale_order_list_main_query = sale_order_list_main_query.order_by(
-                    literal_column("receive_price_numeric").asc())
+        for r in records:
+            order_number = r.get("order_number")
+            order_items = order_items_info.get(order_number, [])
+            r["goods_info"] = order_items
+            total_purchase_quantity = self.get_total_purchase_quantity(order_items=order_items)
+            r["total_purchase_quantity"] = format_number_to_display(total_purchase_quantity)
 
-        else:
-            sale_order_list_main_query = sale_order_list_main_query.order_by(SaleOrder.created_at.desc())
-
-        # 销售订单列表查询结果
-        sale_order_list_query_result = await self.db_session.execute(
-            sale_order_list_main_query
+        amount_count_query = (
+            select(
+                func.coalesce(func.round(func.sum(cast(SaleOrder.total_origin_price, Numeric)), 2), 0).label("total_price"),
+                func.coalesce(func.round(func.sum(cast(SaleOrder.discount_price, Numeric)), 2), 0).label("total_discount_price"),
+                func.coalesce(func.round(func.sum(cast(pay_amount_sub.c.success_pay_amount, Numeric)), 2), 0).label("total_receive_price"),
+                func.count(SaleOrder.id).label("total_count"),
+            )
+            .select_from(SaleOrder)
+            .outerjoin(pay_amount_sub, SaleOrder.id == pay_amount_sub.c.id)
+            .where(SaleOrder.id.in_(select(base_query.c.id)))
         )
-        sale_order_list_query_record_list = [
-            dict(row._mapping) for row in sale_order_list_query_result.fetchall()
-        ]
+        amount_count_result = await self.db_session.execute(amount_count_query)
+        amount_data = dict(amount_count_result.fetchone() or {})
 
-        # 金额统计查询结果
-        amount_count_query_result = await self.db_session.execute(amount_count_query)
-        amount_count_query_record_one = amount_count_query_result.fetchone()
-        amount_count_query_record_one = dict(amount_count_query_record_one._mapping)
-
-        return {
-            "records_list": sale_order_list_query_record_list or [],
-            "amount_data": amount_count_query_record_one or {},
-        }
+        return {"records_list": records, "amount_data": amount_data}
 
     async def get_last_refund_payment_agg_pay_info(
         self, record_id: int, company_id: int
